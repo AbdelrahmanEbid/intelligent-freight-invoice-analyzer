@@ -181,3 +181,124 @@ def detect_anomalies(state: InvoiceAnalysisState) -> InvoiceAnalysisState:
     
     return state
 
+
+# Node 3: Contextual Analyzer
+def analyze_context(state: InvoiceAnalysisState) -> InvoiceAnalysisState:
+    """
+    Node 3: LLM contextual analysis using structured outputs
+    
+    This node uses LLM to understand WHY anomalies exist and if they're justified.
+    Uses Pydantic model for structured output to ensure type safety.
+    """
+    logger.info("Starting contextual analysis with LLM")
+    invoice = state["invoice_data"]
+    historical = state["historical_data"]
+    anomalies = state["anomalies"]
+    
+    # Prepare historical summary
+    historical_summary = ""
+    if historical and len(historical) > 0:
+        avg_cost = sum(h["invoice_amount"] for h in historical) / len(historical)
+        historical_summary = f"Average historical cost: €{avg_cost:.2f} (from {len(historical)} invoices)"
+    else:
+        historical_summary = "No historical data available"
+    
+    # Prepare sample historical data for context
+    sample_historical = historical[:5] if historical else []
+    
+    # Create prompt
+    prompt = f"""You are a freight cost analyst. Analyze this invoice and explain if the anomalies are justified.
+
+CURRENT INVOICE:
+{json.dumps(invoice, indent=2)}
+
+HISTORICAL CONTEXT:
+{historical_summary}
+Sample historical invoices: {json.dumps(sample_historical, indent=2)}
+
+DETECTED ANOMALIES:
+{json.dumps(anomalies, indent=2)}
+
+Analyze whether these anomalies are justified by considering:
+- Weight differences compared to historical averages
+- Seasonal patterns (current date: {invoice.get('shipment_date', 'unknown')})
+- Service level requirements (express vs standard)
+- Market conditions and fuel prices
+- Route complexity
+
+Provide your analysis with contextual factors, justification assessment, and confidence score."""
+    
+    try:
+        # Use structured output for type-safe response
+        llm_with_structure = llm.with_structured_output(ContextualAnalysis)
+        
+        result = llm_with_structure.invoke(prompt)
+        
+        # Extract structured data
+        state["context_factors"] = result.contextual_factors
+        state["reasoning"] = result.overall_assessment
+        state["estimated_fair_cost"] = result.estimated_fair_cost
+        state["confidence_score"] = result.confidence_in_analysis
+        
+        logger.info(f"Contextual analysis complete. Confidence: {result.confidence_in_analysis:.2f}")
+        logger.info(f"Justified anomalies: {len(result.justified_anomalies)}, Suspicious: {len(result.suspicious_anomalies)}")
+        
+    except Exception as e:
+        # Fallback if LLM call fails
+        logger.error(f"LLM analysis failed: {e}")
+        state["context_factors"] = ["Analysis error occurred - using fallback values"]
+        state["reasoning"] = f"Error during analysis: {str(e)}. Using default values."
+        state["estimated_fair_cost"] = state["expected_cost"]
+        state["confidence_score"] = 0.5  # Default to medium confidence
+        logger.warning("Using fallback values due to LLM error")
+    
+    return state
+
+
+# Node 4: Recommendation Engine
+def generate_recommendations(state: InvoiceAnalysisState) -> InvoiceAnalysisState:
+    """
+    Node 4: Final decision and recommendations
+    
+    This node determines the final status based on confidence score and
+    generates actionable recommendations.
+    """
+    logger.info("Generating recommendations")
+    confidence = state.get("confidence_score", 0.5)
+    estimated_fair = state.get("estimated_fair_cost", state["expected_cost"])
+    actual = state["invoice_data"]["invoice_amount"]
+    anomalies = state.get("anomalies", [])
+    
+    recommendations = []
+    
+    # Determine status based on confidence
+    if confidence >= 0.85:
+        state["status"] = "approved"
+        recommendations.append("Approve invoice - pricing within acceptable range")
+        logger.info("Invoice approved automatically")
+    elif confidence >= 0.40:
+        state["status"] = "requires_review"
+        recommendations.append("Manual review recommended - significant variance detected")
+        
+        if actual > estimated_fair * 1.10:
+            savings = actual - estimated_fair
+            recommendations.append(f"Request breakdown from carrier - potential savings: €{savings:.2f}")
+        
+        # Check for high-severity anomalies
+        high_severity = [a for a in anomalies if a.get("severity") in ["high", "critical"]]
+        if high_severity:
+            recommendations.append("Verify contract terms - multiple high-severity anomalies detected")
+        
+        recommendations.append("Compare with 2 alternative carriers for benchmark pricing")
+        logger.info("Invoice requires manual review")
+    else:
+        state["status"] = "rejected"
+        recommendations.append("Reject invoice - significant pricing anomalies detected")
+        recommendations.append("Escalate to procurement for carrier relationship review")
+        logger.warning("Invoice rejected automatically")
+    
+    state["recommendations"] = recommendations
+    logger.info(f"Generated {len(recommendations)} recommendations")
+    
+    return state
+

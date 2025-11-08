@@ -54,6 +54,8 @@ class InvoiceAnalysisState(TypedDict):
     expected_cost: float
     anomalies: List[dict]
     context_factors: List[str]
+    justified_anomalies: List[str]  # Anomaly types that are justified
+    suspicious_anomalies: List[str]  # Anomaly types that remain concerning
     confidence_score: float
     status: str
     reasoning: str
@@ -193,7 +195,18 @@ def analyze_context(state: InvoiceAnalysisState) -> InvoiceAnalysisState:
     logger.info("Starting contextual analysis with LLM")
     invoice = state["invoice_data"]
     historical = state["historical_data"]
-    anomalies = state["anomalies"]
+    anomalies = state.get("anomalies", [])
+    
+    # Safety check: If no anomalies, skip LLM and approve directly
+    if len(anomalies) == 0:
+        logger.info("No anomalies detected - skipping LLM analysis and approving")
+        state["context_factors"] = ["No anomalies detected - standard pricing"]
+        state["reasoning"] = "No significant anomalies detected. Invoice pricing is within acceptable range."
+        state["estimated_fair_cost"] = state["expected_cost"]
+        state["confidence_score"] = 0.95
+        state["justified_anomalies"] = []
+        state["suspicious_anomalies"] = []
+        return state
     
     # Prepare historical summary
     historical_summary = ""
@@ -206,11 +219,20 @@ def analyze_context(state: InvoiceAnalysisState) -> InvoiceAnalysisState:
     # Prepare sample historical data for context
     sample_historical = historical[:5] if historical else []
     
+    # Calculate variance for context
+    actual = invoice["invoice_amount"]
+    expected = state["expected_cost"]
+    variance_percent = ((actual - expected) / expected) * 100 if expected > 0 else 0
+    
     # Create prompt
     prompt = f"""You are a freight cost analyst. Analyze this invoice and explain if the anomalies are justified.
 
 CURRENT INVOICE:
 {json.dumps(invoice, indent=2)}
+
+EXPECTED COST: €{expected:.2f}
+ACTUAL COST: €{actual:.2f}
+VARIANCE: {variance_percent:+.2f}%
 
 HISTORICAL CONTEXT:
 {historical_summary}
@@ -225,6 +247,9 @@ Analyze whether these anomalies are justified by considering:
 - Service level requirements (express vs standard)
 - Market conditions and fuel prices
 - Route complexity
+- The variance percentage ({variance_percent:+.2f}%) - small variances (<5%) are typically acceptable
+
+IMPORTANT: If the variance is small (<5%) and there are no significant anomalies, set confidence_in_analysis to 0.85 or higher for approval.
 
 Provide your analysis with contextual factors, justification assessment, and confidence score."""
     
@@ -239,18 +264,37 @@ Provide your analysis with contextual factors, justification assessment, and con
         state["reasoning"] = result.overall_assessment
         state["estimated_fair_cost"] = result.estimated_fair_cost
         state["confidence_score"] = result.confidence_in_analysis
+        state["justified_anomalies"] = result.justified_anomalies
+        state["suspicious_anomalies"] = result.suspicious_anomalies
         
         logger.info(f"Contextual analysis complete. Confidence: {result.confidence_in_analysis:.2f}")
         logger.info(f"Justified anomalies: {len(result.justified_anomalies)}, Suspicious: {len(result.suspicious_anomalies)}")
+        logger.info(f"Justified: {result.justified_anomalies}")
+        logger.info(f"Suspicious: {result.suspicious_anomalies}")
+        
+        # Safety: Ensure confidence is reasonable based on variance
+        if abs(variance_percent) < 1 and state["confidence_score"] < 0.85:
+            logger.warning(f"Very small variance ({variance_percent:.2f}%) but low confidence ({state['confidence_score']:.2f}) - adjusting to 0.90")
+            state["confidence_score"] = 0.90
         
     except Exception as e:
         # Fallback if LLM call fails
         logger.error(f"LLM analysis failed: {e}")
-        state["context_factors"] = ["Analysis error occurred - using fallback values"]
-        state["reasoning"] = f"Error during analysis: {str(e)}. Using default values."
+        # Use variance to determine fallback confidence
+        if abs(variance_percent) < 5:
+            fallback_confidence = 0.85
+            fallback_reasoning = "LLM analysis unavailable, but variance is small - approving based on variance alone"
+        else:
+            fallback_confidence = 0.6
+            fallback_reasoning = f"LLM analysis unavailable. Variance: {variance_percent:.2f}% - requires review"
+        
+        state["context_factors"] = ["Analysis error occurred - using fallback values based on variance"]
+        state["reasoning"] = fallback_reasoning
         state["estimated_fair_cost"] = state["expected_cost"]
-        state["confidence_score"] = 0.5  # Default to medium confidence
-        logger.warning("Using fallback values due to LLM error")
+        state["confidence_score"] = fallback_confidence
+        state["justified_anomalies"] = []
+        state["suspicious_anomalies"] = list(set([a.get("type", "unknown") for a in anomalies])) if anomalies else []
+        logger.warning(f"Using fallback values due to LLM error. Set confidence to {fallback_confidence}")
     
     return state
 

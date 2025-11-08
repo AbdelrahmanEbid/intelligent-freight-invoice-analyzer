@@ -138,7 +138,31 @@ def detect_anomalies(state: InvoiceAnalysisState) -> InvoiceAnalysisState:
     invoice = state["invoice_data"]
     historical = state["historical_data"]
     expected = state["expected_cost"]
-    anomalies = state.get("anomalies", [])
+    
+    # Start with anomalies from validation node (business logic checks)
+    # But filter out any anomalies from previous test cases to prevent state contamination
+    existing_anomalies = state.get("anomalies", [])
+    current_amount = invoice["invoice_amount"]
+    current_invoice_id = invoice.get("invoice_id", "")
+    
+    # Filter anomalies:
+    # 1. Keep validation anomalies (they don't have "actual" field - cost_per_km, cost_per_kg checks)
+    # 2. Keep anomalies that match current invoice amount
+    # 3. Remove anomalies from previous invoices (state contamination)
+    anomalies = []
+    for a in existing_anomalies:
+        anomaly_actual = a.get("actual")
+        # Validation anomalies don't have "actual" field - keep them
+        if anomaly_actual is None:
+            anomalies.append(a)
+        # Detection anomalies with "actual" field - only keep if matches current invoice
+        elif anomaly_actual == current_amount:
+            anomalies.append(a)
+        # Otherwise, it's from a previous invoice - skip it
+        else:
+            logger.warning(f"Filtering out anomaly from previous invoice: {a.get('description', 'unknown')} (amount: {anomaly_actual})")
+    
+    logger.info(f"Starting anomaly detection with {len(anomalies)} existing anomalies (after filtering, invoice: {current_invoice_id})")
     
     try:
         actual = invoice["invoice_amount"]
@@ -182,7 +206,6 @@ def detect_anomalies(state: InvoiceAnalysisState) -> InvoiceAnalysisState:
         raise
     
     return state
-
 
 # Node 3: Contextual Analyzer
 def analyze_context(state: InvoiceAnalysisState) -> InvoiceAnalysisState:

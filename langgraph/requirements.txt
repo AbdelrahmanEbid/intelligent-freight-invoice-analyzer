@@ -1,0 +1,8 @@
+langchain
+langchain_core
+langgraph
+langgraph-cli[inmem]
+langchain-google-genai
+langchain_openai
+python-dotenv
+pydantic

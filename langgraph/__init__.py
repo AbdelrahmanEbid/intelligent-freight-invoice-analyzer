@@ -314,9 +314,13 @@ def generate_recommendations(state: InvoiceAnalysisState) -> InvoiceAnalysisStat
     actual = state["invoice_data"]["invoice_amount"]
     anomalies = state.get("anomalies", [])
     
+    logger.info(f"Current confidence score: {confidence}")
+    logger.info(f"Number of anomalies: {len(anomalies)}")
+    
     recommendations = []
-
-    # Safety check: If no anomalies and confidence is 0, this now works correctly
+    
+    # Safety check: If no anomalies and confidence is 0, this means routing didn't work correctly
+    # Set high confidence for approval
     if len(anomalies) == 0 and confidence == 0.0:
         logger.warning("No anomalies detected but confidence is 0 - setting to approved")
         confidence = 0.95
@@ -328,30 +332,131 @@ def generate_recommendations(state: InvoiceAnalysisState) -> InvoiceAnalysisStat
     if confidence >= 0.85:
         state["status"] = "approved"
         recommendations.append("Approve invoice - pricing within acceptable range")
-        logger.info("Invoice approved automatically")
+        logger.info(f"Invoice approved automatically (confidence: {confidence:.2f})")
     elif confidence >= 0.40:
         state["status"] = "requires_review"
-        recommendations.append("Manual review recommended - significant variance detected")
         
-        if actual > estimated_fair * 1.10:
-            savings = actual - estimated_fair
-            recommendations.append(f"Request breakdown from carrier - potential savings: €{savings:.2f}")
+        # Get justification information from LLM analysis
+        justified_anomalies = state.get("justified_anomalies", [])
+        suspicious_anomalies = state.get("suspicious_anomalies", [])
+        all_anomaly_types = [a.get("type", "unknown") for a in anomalies]
         
-        # Check for high-severity anomalies
-        high_severity = [a for a in anomalies if a.get("severity") in ["high", "critical"]]
-        if high_severity:
-            recommendations.append("Verify contract terms - multiple high-severity anomalies detected")
+        # Check if service type difference explains the variance
+        invoice_service = state["invoice_data"].get("service_type", "standard")
+        has_service_type_justification = any(
+            "express" in str(factor).lower() or "service" in str(factor).lower() 
+            for factor in state.get("context_factors", [])
+        )
         
-        recommendations.append("Compare with 2 alternative carriers for benchmark pricing")
-        logger.info("Invoice requires manual review")
+        # Determine recommendation tone based on justification
+        if len(justified_anomalies) > 0 and len(suspicious_anomalies) == 0:
+            # All anomalies are justified - more positive recommendations
+            recommendations.append("Manual review recommended - variance appears justified by service level or market conditions")
+            
+            if invoice_service == "express":
+                recommendations.append("Express service typically incurs 30-70% premium - verify this matches contract terms")
+            elif has_service_type_justification:
+                recommendations.append("Service level difference explains variance - verify service type matches order requirements")
+            
+            # Only suggest savings if variance is still high after justification
+            if actual > estimated_fair * 1.20:  # Higher threshold for justified cases
+                savings = actual - estimated_fair
+                recommendations.append(f"Request detailed breakdown to confirm all charges are justified - potential savings: €{savings:.2f}")
+            else:
+                recommendations.append("Review recommended for documentation, but pricing appears reasonable for service level")
+                
+        elif len(justified_anomalies) > 0 and len(suspicious_anomalies) > 0:
+            # Mixed: some justified, some suspicious - provide nuanced recommendations
+            recommendations.append("Manual review recommended - variance partially justified, but some concerns remain")
+            
+            # Acknowledge what's justified first
+            if invoice_service == "express":
+                recommendations.append("✓ Express service premium is justified (typically 30-50% over standard)")
+            elif has_service_type_justification:
+                recommendations.append("✓ Service level difference explains part of the variance")
+            
+            # Check context factors for other justifications
+            context_factors = state.get("context_factors", [])
+            if any("seasonal" in str(f).lower() for f in context_factors):
+                recommendations.append("✓ Seasonal factors may contribute to higher costs")
+            if any("fuel" in str(f).lower() for f in context_factors):
+                recommendations.append("✓ Fuel surcharges may be justified based on current market rates")
+            
+            # Now address what's suspicious
+            variance_percent = ((actual - estimated_fair) / estimated_fair) * 100 if estimated_fair > 0 else 0
+            
+            # Calculate estimated justified portion
+            if invoice_service == "express":
+                # Express typically adds 30-50%, so estimate justified cost
+                estimated_justified_cost = estimated_fair * 1.40  # Use 40% as middle ground
+                potentially_unjustified = max(0, actual - estimated_justified_cost)
+                
+                if potentially_unjustified > 50:  # More than €50 potentially unjustified
+                    recommendations.append(f"⚠ The invoice exceeds typical express premium ({variance_percent:.1f}% vs expected 30-50%)")
+                    recommendations.append(f"⚠ Focus review on the excess amount (~€{potentially_unjustified:.2f} above typical express rate)")
+                    recommendations.append(f"Request itemized breakdown to verify: express surcharge %, fuel surcharge, and any additional fees")
+                else:
+                    recommendations.append("Request itemized breakdown to confirm all charges match contract terms")
+            else:
+                # For other cases, use standard approach
+                if actual > estimated_fair * 1.10:
+                    savings = actual - estimated_fair
+                    recommendations.append(f"Request breakdown from carrier - focus on charges exceeding justified factors (potential savings: €{savings:.2f})")
+            
+            # Check for high-severity suspicious anomalies
+            # Note: suspicious_anomalies contains descriptions, not types, so we check differently
+            high_severity = [a for a in anomalies if a.get("severity") in ["high", "critical"]]
+            if high_severity:
+                recommendations.append("⚠ Verify contract terms for high-severity anomalies - ensure express premium rates match agreement")
+            
+            # Add specific action based on suspicious factors
+            if any("exceeds typical" in str(s).lower() or "cannot establish" in str(s).lower() for s in suspicious_anomalies):
+                recommendations.append("Compare with 2-3 alternative carriers for express service on same route to establish benchmark")
+            
+            # Final recommendation
+            recommendations.append("Approve justified portion, request clarification on excess charges before full payment")
+            
+        else:
+            # No justification or all suspicious - standard cautious recommendations
+            recommendations.append("Manual review recommended - significant variance detected")
+            
+            if actual > estimated_fair * 1.10:
+                savings = actual - estimated_fair
+                recommendations.append(f"Request breakdown from carrier - potential savings: €{savings:.2f}")
+            
+            # Check for high-severity anomalies
+            high_severity = [a for a in anomalies if a.get("severity") in ["high", "critical"]]
+            if high_severity:
+                recommendations.append("Verify contract terms - multiple high-severity anomalies detected")
+            
+            recommendations.append("Compare with 2 alternative carriers for benchmark pricing")
+        
+        logger.info(f"Invoice requires manual review (confidence: {confidence:.2f}, justified: {len(justified_anomalies)}, suspicious: {len(suspicious_anomalies)})")
     else:
-        state["status"] = "rejected"
-        recommendations.append("Reject invoice - significant pricing anomalies detected")
-        recommendations.append("Escalate to procurement for carrier relationship review")
-        logger.warning("Invoice rejected automatically")
+        # Only reject if there are actual anomalies or very low confidence with high variance
+        variance_percent = ((actual - estimated_fair) / estimated_fair) * 100 if estimated_fair > 0 else 0
+        
+        # Safety: Don't reject if variance is small (< 10%) even with low confidence
+        if abs(variance_percent) < 10 and len(anomalies) == 0:
+            logger.warning(f"Low confidence ({confidence:.2f}) but small variance ({variance_percent:.2f}%) - approving instead of rejecting")
+            state["status"] = "approved"
+            state["confidence_score"] = 0.85
+            recommendations.append("Approve invoice - pricing within acceptable range despite low confidence")
+        else:
+            state["status"] = "rejected"
+            recommendations.append("Reject invoice - significant pricing anomalies detected")
+            recommendations.append("Escalate to procurement for carrier relationship review")
+            logger.warning(f"Invoice rejected automatically (confidence: {confidence:.2f}, variance: {variance_percent:.2f}%)")
+    
+    # Ensure reasoning is set
+    if not state.get("reasoning") or state.get("reasoning") == "":
+        if state["status"] == "approved":
+            state["reasoning"] = "No significant anomalies detected - invoice approved"
+        else:
+            state["reasoning"] = "Analysis completed with recommendations"
     
     state["recommendations"] = recommendations
-    logger.info(f"Generated {len(recommendations)} recommendations")
+    logger.info(f"Generated {len(recommendations)} recommendations. Final status: {state['status']}")
     
     return state
 
@@ -371,6 +476,7 @@ def route_after_detection(state: InvoiceAnalysisState) -> str:
         return "analyze"
     else:
         # No anomalies - set approval values and route to recommend
+        # Note: We set values here but recommend node will also set them as safety
         logger.info("No anomalies found - routing to direct approval")
         state["status"] = "approved"
         state["confidence_score"] = 0.95

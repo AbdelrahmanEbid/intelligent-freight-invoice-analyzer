@@ -264,12 +264,21 @@ def generate_recommendations(state: InvoiceAnalysisState) -> InvoiceAnalysisStat
     generates actionable recommendations.
     """
     logger.info("Generating recommendations")
-    confidence = state.get("confidence_score", 0.5)
+
+    confidence = state.get("confidence_score", 0.0) # Default to 0.0 to make the safety check work
     estimated_fair = state.get("estimated_fair_cost", state["expected_cost"])
     actual = state["invoice_data"]["invoice_amount"]
     anomalies = state.get("anomalies", [])
     
     recommendations = []
+
+    # Safety check: If no anomalies and confidence is 0, this now works correctly
+    if len(anomalies) == 0 and confidence == 0.0:
+        logger.warning("No anomalies detected but confidence is 0 - setting to approved")
+        confidence = 0.95
+        state["confidence_score"] = 0.95
+        state["reasoning"] = "No significant anomalies detected - invoice approved"
+        state["estimated_fair_cost"] = state["expected_cost"]
     
     # Determine status based on confidence
     if confidence >= 0.85:
@@ -311,18 +320,23 @@ def route_after_detection(state: InvoiceAnalysisState) -> str:
     This implements conditional routing based on workflow state.
     """
     anomalies = state.get("anomalies", [])
+    logger.info(f"Routing decision: {len(anomalies)} anomalies detected")
+    
     if len(anomalies) > 0:
         logger.info(f"Routing to analyze context ({len(anomalies)} anomalies found)")
         return "analyze"
     else:
-        # No anomalies - auto approve
+        # No anomalies - set approval values and route to recommend
         logger.info("No anomalies found - routing to direct approval")
         state["status"] = "approved"
         state["confidence_score"] = 0.95
-        state["reasoning"] = "No significant anomalies detected"
+        state["reasoning"] = "No significant anomalies detected - invoice pricing is within acceptable range"
         state["recommendations"] = ["Approve invoice - pricing is within acceptable range"]
-        state["estimated_fair_cost"] = state["expected_cost"]
+        state["estimated_fair_cost"] = state.get("expected_cost", state["invoice_data"]["invoice_amount"])
         state["context_factors"] = ["No anomalies detected - standard pricing"]
+        state["justified_anomalies"] = []
+        state["suspicious_anomalies"] = []
+        logger.info("Set approval values in routing function")
         return "recommend"
 
 

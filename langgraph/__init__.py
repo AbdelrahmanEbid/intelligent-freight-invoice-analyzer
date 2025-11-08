@@ -302,3 +302,71 @@ def generate_recommendations(state: InvoiceAnalysisState) -> InvoiceAnalysisStat
     
     return state
 
+
+# Conditional routing function
+def route_after_detection(state: InvoiceAnalysisState) -> str:
+    """
+    Route after anomaly detection: analyze if anomalies found, else approve
+    
+    This implements conditional routing based on workflow state.
+    """
+    anomalies = state.get("anomalies", [])
+    if len(anomalies) > 0:
+        logger.info(f"Routing to analyze context ({len(anomalies)} anomalies found)")
+        return "analyze"
+    else:
+        # No anomalies - auto approve
+        logger.info("No anomalies found - routing to direct approval")
+        state["status"] = "approved"
+        state["confidence_score"] = 0.95
+        state["reasoning"] = "No significant anomalies detected"
+        state["recommendations"] = ["Approve invoice - pricing is within acceptable range"]
+        state["estimated_fair_cost"] = state["expected_cost"]
+        state["context_factors"] = ["No anomalies detected - standard pricing"]
+        return "recommend"
+
+
+# Build the workflow
+def build_analysis_graph():
+    """
+    Build and return the LangGraph workflow
+    
+    Architecture: Sequential Processing with Conditional Routing
+    - Sequential: validate -> detect -> (conditional) -> analyze -> recommend
+    - Conditional: Routes to analyze if anomalies found, else skips to recommend
+    """
+    logger.info("Building analysis graph")
+    workflow = StateGraph(InvoiceAnalysisState)
+    
+    # Add nodes (single responsibility principle)
+    workflow.add_node("validate", validate_business_logic)
+    workflow.add_node("detect", detect_anomalies)
+    workflow.add_node("analyze", analyze_context)
+    workflow.add_node("recommend", generate_recommendations)
+    
+    # Set entry point
+    workflow.add_edge(START, "validate")
+    
+    # Sequential edges
+    workflow.add_edge("validate", "detect")
+    
+    # Conditional edge: route based on anomalies
+    workflow.add_conditional_edges(
+        "detect",
+        route_after_detection,
+        {
+            "analyze": "analyze",
+            "recommend": "recommend"
+        }
+    )
+    
+    # Final edges
+    workflow.add_edge("analyze", "recommend")
+    workflow.add_edge("recommend", END)
+    
+    logger.info("Graph built successfully")
+    return workflow.compile()
+
+
+# Compile the graph (required for LangGraph CLI)
+graph = build_analysis_graph()

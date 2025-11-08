@@ -207,6 +207,7 @@ def detect_anomalies(state: InvoiceAnalysisState) -> InvoiceAnalysisState:
     
     return state
 
+
 # Node 3: Contextual Analyzer
 def analyze_context(state: InvoiceAnalysisState) -> InvoiceAnalysisState:
     """
@@ -429,6 +430,7 @@ Return your analysis with:
     
     return state
 
+
 # Node 4: Recommendation Engine
 def generate_recommendations(state: InvoiceAnalysisState) -> InvoiceAnalysisState:
     """
@@ -537,11 +539,19 @@ def generate_recommendations(state: InvoiceAnalysisState) -> InvoiceAnalysisStat
             # Note: suspicious_anomalies contains descriptions, not types, so we check differently
             high_severity = [a for a in anomalies if a.get("severity") in ["high", "critical"]]
             if high_severity:
-                recommendations.append("⚠ Verify contract terms for high-severity anomalies - ensure express premium rates match agreement")
+                # Only mention express premium if it's actually an express service
+                if invoice_service == "express":
+                    recommendations.append("⚠ Verify contract terms for high-severity anomalies - ensure express premium rates match agreement")
+                else:
+                    recommendations.append("⚠ Verify contract terms for high-severity anomalies - ensure all charges match contract agreement")
             
             # Add specific action based on suspicious factors
             if any("exceeds typical" in str(s).lower() or "cannot establish" in str(s).lower() for s in suspicious_anomalies):
-                recommendations.append("Compare with 2-3 alternative carriers for express service on same route to establish benchmark")
+                # Only mention express service benchmark if it's express
+                if invoice_service == "express":
+                    recommendations.append("Compare with 2-3 alternative carriers for express service on same route to establish benchmark")
+                else:
+                    recommendations.append("Compare with 2-3 alternative carriers for standard service on same route to establish benchmark")
             
             # Final recommendation
             recommendations.append("Approve justified portion, request clarification on excess charges before full payment")

@@ -1,0 +1,84 @@
+[
+    {
+      "name": "Test Case 1: Baseline / Happy Path",
+      "input": {
+        "invoice_data": {
+          "invoice_id": "TEST-001",
+          "carrier": "DHL Freight",
+          "origin": "Berlin",
+          "destination": "Munich",
+          "weight_kg": 1200,
+          "distance_km": 585,
+          "invoice_amount": 755.00,
+          "service_type": "standard",
+          "shipment_date": "2024-11-05"
+        },
+        "historical_data": [
+          {"invoice_id": "HIST-001", "carrier": "DHL Freight", "origin": "Berlin", "destination": "Munich", "weight_kg": 1200, "distance_km": 585, "invoice_amount": 750.00, "service_type": "standard"},
+          {"invoice_id": "HIST-002", "carrier": "DHL Freight", "origin": "Berlin", "destination": "Munich", "weight_kg": 1100, "distance_km": 585, "invoice_amount": 720.00, "service_type": "standard"},
+          {"invoice_id": "HIST-003", "carrier": "Schenker", "origin": "Berlin", "destination": "Munich", "weight_kg": 1300, "distance_km": 590, "invoice_amount": 780.00, "service_type": "standard"}
+        ],
+        "expected_cost": 750.50
+      }
+    },
+    {
+      "name": "Test Case 2: Justified High Cost (Express)",
+      "input": {
+        "invoice_data": {
+          "invoice_id": "TEST-002-EXPRESS",
+          "carrier": "DHL Freight",
+          "origin": "Berlin",
+          "destination": "Munich",
+          "weight_kg": 1200,
+          "distance_km": 585,
+          "invoice_amount": 1150.00,
+          "service_type": "express",
+          "shipment_date": "2024-11-06"
+        },
+        "historical_data": [
+          {"invoice_id": "HIST-001", "carrier": "DHL Freight", "origin": "Berlin", "destination": "Munich", "weight_kg": 1200, "distance_km": 585, "invoice_amount": 750.00, "service_type": "standard"}
+        ],
+        "expected_cost": 750.50
+      }
+    },
+    {
+      "name": "Test Case 3: Ambiguous High Cost (Review)",
+      "input": {
+        "invoice_data": {
+          "invoice_id": "TEST-003-REVIEW",
+          "carrier": "DHL Freight",
+          "origin": "Berlin",
+          "destination": "Munich",
+          "weight_kg": 1200,
+          "distance_km": 585,
+          "invoice_amount": 950.00,
+          "service_type": "standard",
+          "shipment_date": "2024-11-07"
+        },
+        "historical_data": [
+          {"invoice_id": "HIST-001", "carrier": "DHL Freight", "origin": "Berlin", "destination": "Munich", "weight_kg": 1200, "distance_km": 585, "invoice_amount": 750.00, "service_type": "standard"}
+        ],
+        "expected_cost": 750.50
+      }
+    },
+    {
+      "name": "Test Case 4: Severe Anomaly (Reject)",
+      "input": {
+        "invoice_data": {
+          "invoice_id": "TEST-004-REJECT",
+          "carrier": "DHL Freight",
+          "origin": "Berlin",
+          "destination": "Munich",
+          "weight_kg": 1200,
+          "distance_km": 585,
+          "invoice_amount": 1800.00,
+          "service_type": "standard",
+          "shipment_date": "2024-11-08"
+        },
+        "historical_data": [
+          {"invoice_id": "HIST-001", "carrier": "DHL Freight", "origin": "Berlin", "destination": "Munich", "weight_kg": 1200, "distance_km": 585, "invoice_amount": 750.00, "service_type": "standard"}
+        ],
+        "expected_cost": 750.50
+      }
+    }
+  ]

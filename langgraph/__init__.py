@@ -247,8 +247,8 @@ def analyze_context(state: InvoiceAnalysisState) -> InvoiceAnalysisState:
     expected = state["expected_cost"]
     variance_percent = ((actual - expected) / expected) * 100 if expected > 0 else 0
     
-    # Create prompt
-    prompt = f"""You are a freight cost analyst. Analyze this invoice and explain if the anomalies are justified.
+    # Create prompt with better guidance
+    prompt = f"""You are an experienced freight cost analyst. Analyze this invoice and determine if the price variance is justified.
 
 CURRENT INVOICE:
 {json.dumps(invoice, indent=2)}
@@ -264,17 +264,48 @@ Sample historical invoices: {json.dumps(sample_historical, indent=2)}
 DETECTED ANOMALIES:
 {json.dumps(anomalies, indent=2)}
 
-Analyze whether these anomalies are justified by considering:
-- Weight differences compared to historical averages
-- Seasonal patterns (current date: {invoice.get('shipment_date', 'unknown')})
-- Service level requirements (express vs standard)
-- Market conditions and fuel prices
-- Route complexity
-- The variance percentage ({variance_percent:+.2f}%) - small variances (<5%) are typically acceptable
+ANALYSIS INSTRUCTIONS:
+1. Consider ALL contextual factors that could justify the variance:
+   - Service level differences (express vs standard typically adds 30-50%)
+   - Seasonal demand (pre-holiday periods often add 10-20% premium)
+   - Fuel price increases (can add 15-25% in volatile markets)
+   - Market capacity constraints (can add 10-15% during peak times)
+   - Weight and route differences
+   - Carrier-specific rate adjustments
 
-IMPORTANT: If the variance is small (<5%) and there are no significant anomalies, set confidence_in_analysis to 0.85 or higher for approval.
+2. CONFIDENCE SCORING (CRITICAL - Read carefully):
+   - HIGH confidence (0.85-1.0): You are CONFIDENT the invoice is JUSTIFIED and should be APPROVED
+   - MEDIUM confidence (0.40-0.85): You are UNSURE - some factors justify it, some don't → REQUIRES REVIEW
+   - LOW confidence (0.0-0.40): You are CONFIDENT the invoice is UNJUSTIFIED and should be REJECTED
+   
+   IMPORTANT: 
+   - If you say "unjustified", "fraud", "billing error" → confidence MUST be LOW (< 0.40)
+   - If you say "justified", "acceptable", "reasonable" → confidence SHOULD be HIGH (≥ 0.70)
+   - If ALL anomalies are suspicious and NONE justified → confidence MUST be LOW (< 0.40)
+   - If variance > 100% with no strong justification → confidence MUST be LOW (< 0.40)
+   
+3. Be REASONABLE in your assessment:
+   - If variance is 15-30% and contextual factors exist → confidence 0.50-0.75 (REVIEW)
+   - If variance is 30-50% with strong justification (express service) → confidence 0.70-0.90 (APPROVE or REVIEW)
+   - If variance is 30-50% without strong justification → confidence 0.40-0.60 (REVIEW)
+   - If variance > 100% with no strong justification → confidence 0.15-0.30 (REJECT)
+   - Only use confidence < 0.40 (REJECT) for cases where invoice is clearly unjustified
 
-Provide your analysis with contextual factors, justification assessment, and confidence score."""
+4. For THIS specific case:
+   - Variance: {variance_percent:.1f}%
+   - Service type: {invoice.get('service_type', 'standard')}
+   - Consider if this variance could be explained by legitimate factors
+   - Be balanced: don't be too strict, but don't approve everything
+
+5. Provide DETAILED reasoning (2-3 sentences minimum) explaining your assessment.
+
+Return your analysis with:
+- contextual_factors: List all factors that could affect cost (even if uncertain)
+- justified_anomalies: List which anomalies/types are justified and why
+- suspicious_anomalies: List which anomalies/types remain concerning and why
+- overall_assessment: Detailed explanation (2-3 sentences) of your reasoning
+- estimated_fair_cost: What you think the fair cost should be (considering all factors)
+- confidence_in_analysis: Your confidence (0.0-1.0) - be reasonable based on variance level and justification"""
     
     try:
         # Use structured output for type-safe response
@@ -295,32 +326,108 @@ Provide your analysis with contextual factors, justification assessment, and con
         logger.info(f"Justified: {result.justified_anomalies}")
         logger.info(f"Suspicious: {result.suspicious_anomalies}")
         
-        # Safety: Ensure confidence is reasonable based on variance
+        # Safety: Ensure confidence is reasonable based on variance, service type, and reasoning
+        invoice_service = invoice.get("service_type", "standard")
+        reasoning_lower = state.get("reasoning", "").lower()
+        justified_count = len(state.get("justified_anomalies", []))
+        suspicious_count = len(state.get("suspicious_anomalies", []))
+        
+        # CRITICAL: Check for contradictions between reasoning and confidence
+        # If reasoning says "unjustified", "fraud", "error", "billing error" → confidence should be LOW
+        rejection_keywords = ["unjustified", "fraud", "billing error", "error", "cannot be justified", 
+                             "likely reflects", "appears to be", "warrants rejection", "should be rejected"]
+        if any(keyword in reasoning_lower for keyword in rejection_keywords):
+            if state["confidence_score"] > 0.40:
+                logger.error(f"CRITICAL: Reasoning indicates rejection but confidence is {state['confidence_score']:.2f} - adjusting to 0.25")
+                state["confidence_score"] = 0.25
+        
+        # CRITICAL: If ALL anomalies are suspicious and NONE justified, confidence should be LOW
+        if suspicious_count > 0 and justified_count == 0 and state["confidence_score"] > 0.40:
+            logger.error(f"CRITICAL: All anomalies suspicious but confidence is {state['confidence_score']:.2f} - adjusting to 0.30")
+            state["confidence_score"] = min(state["confidence_score"], 0.30)
+        
+        # CRITICAL: Extreme variance (>100%) should never have high confidence
+        if abs(variance_percent) > 100 and state["confidence_score"] > 0.40:
+            logger.error(f"CRITICAL: Extreme variance ({variance_percent:.2f}%) but confidence is {state['confidence_score']:.2f} - adjusting to 0.20")
+            state["confidence_score"] = 0.20
+        
+        # Adjust confidence if LLM is too strict or too lenient (but only if no contradictions)
         if abs(variance_percent) < 1 and state["confidence_score"] < 0.85:
             logger.warning(f"Very small variance ({variance_percent:.2f}%) but low confidence ({state['confidence_score']:.2f}) - adjusting to 0.90")
             state["confidence_score"] = 0.90
+        elif abs(variance_percent) < 5 and state["confidence_score"] < 0.70:
+            logger.warning(f"Small variance ({variance_percent:.2f}%) but low confidence ({state['confidence_score']:.2f}) - adjusting to 0.75")
+            state["confidence_score"] = 0.75
+        elif invoice_service == "express" and abs(variance_percent) < 60 and state["confidence_score"] < 0.50:
+            # Express service with moderate variance should not be rejected
+            logger.warning(f"Express service with {variance_percent:.2f}% variance but low confidence ({state['confidence_score']:.2f}) - adjusting to 0.60")
+            state["confidence_score"] = 0.60
+        elif abs(variance_percent) >= 15 and abs(variance_percent) <= 30 and state["confidence_score"] < 0.40:
+            # Moderate variance (15-30%) should at least be reviewed, not rejected
+            logger.warning(f"Moderate variance ({variance_percent:.2f}%) but very low confidence ({state['confidence_score']:.2f}) - adjusting to 0.45 for review")
+            state["confidence_score"] = 0.45
+        elif abs(variance_percent) > 100 and state["confidence_score"] < 0.20:
+            # Extreme variance should have very low confidence
+            logger.warning(f"Extreme variance ({variance_percent:.2f}%) - ensuring low confidence ({state['confidence_score']:.2f})")
+            state["confidence_score"] = min(state["confidence_score"], 0.20)
+        
+        # Ensure reasoning is not empty or too brief
+        if not state.get("reasoning") or len(state.get("reasoning", "")) < 20:
+            logger.warning("Reasoning is too brief or empty - generating fallback reasoning")
+            if len(state.get("justified_anomalies", [])) > 0:
+                state["reasoning"] = f"Variance of {variance_percent:.1f}% is partially justified by contextual factors. Some anomalies are explained, but others require clarification. Manual review recommended."
+            else:
+                state["reasoning"] = f"Variance of {variance_percent:.1f}% is significant and requires investigation. No clear justification found for the price difference. Manual review required."
+        
+        # Ensure context factors are not empty
+        if not state.get("context_factors") or len(state.get("context_factors", [])) == 0:
+            logger.warning("Context factors are empty - generating fallback factors")
+            fallback_factors = []
+            if invoice_service == "express":
+                fallback_factors.append("Express service typically incurs premium over standard service")
+            if abs(variance_percent) > 20:
+                fallback_factors.append(f"Significant variance ({variance_percent:.1f}%) requires investigation")
+            fallback_factors.append("Seasonal and market factors may contribute to cost differences")
+            state["context_factors"] = fallback_factors
         
     except Exception as e:
         # Fallback if LLM call fails
         logger.error(f"LLM analysis failed: {e}")
-        # Use variance to determine fallback confidence
+        import traceback
+        logger.error(f"Error details: {traceback.format_exc()}")
+        
+        # Use variance and service type to determine fallback confidence
+        invoice_service = invoice.get("service_type", "standard")
+        
         if abs(variance_percent) < 5:
             fallback_confidence = 0.85
             fallback_reasoning = "LLM analysis unavailable, but variance is small - approving based on variance alone"
+        elif invoice_service == "express" and abs(variance_percent) < 60:
+            fallback_confidence = 0.65
+            fallback_reasoning = f"LLM analysis unavailable. Express service with {variance_percent:.1f}% variance - review recommended"
+        elif abs(variance_percent) < 30:
+            fallback_confidence = 0.55
+            fallback_reasoning = f"LLM analysis unavailable. Moderate variance ({variance_percent:.1f}%) - review recommended"
+        elif abs(variance_percent) < 100:
+            fallback_confidence = 0.35
+            fallback_reasoning = f"LLM analysis unavailable. High variance ({variance_percent:.1f}%) - review required"
         else:
-            fallback_confidence = 0.6
-            fallback_reasoning = f"LLM analysis unavailable. Variance: {variance_percent:.2f}% - requires review"
+            fallback_confidence = 0.15
+            fallback_reasoning = f"LLM analysis unavailable. Extreme variance ({variance_percent:.1f}%) - rejection recommended"
         
-        state["context_factors"] = ["Analysis error occurred - using fallback values based on variance"]
+        state["context_factors"] = [
+            "LLM analysis unavailable - using fallback values",
+            f"Variance: {variance_percent:.1f}%",
+            "Service type: " + invoice_service
+        ]
         state["reasoning"] = fallback_reasoning
         state["estimated_fair_cost"] = state["expected_cost"]
         state["confidence_score"] = fallback_confidence
         state["justified_anomalies"] = []
-        state["suspicious_anomalies"] = list(set([a.get("type", "unknown") for a in anomalies])) if anomalies else []
+        state["suspicious_anomalies"] = [a.get("type", "unknown") for a in anomalies] if anomalies else []
         logger.warning(f"Using fallback values due to LLM error. Set confidence to {fallback_confidence}")
     
     return state
-
 
 # Node 4: Recommendation Engine
 def generate_recommendations(state: InvoiceAnalysisState) -> InvoiceAnalysisState:

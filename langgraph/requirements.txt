@@ -1,0 +1,9 @@
+langchain
+langchain_core
+IPython
+
+# langgraph cli
+langgraph-cli[inmem]
+
+langchain-google-genai
+langchain_openai
